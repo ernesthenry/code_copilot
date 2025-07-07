@@ -1,244 +1,195 @@
-# MCP Code Copilot Server - Configuration & Usage Guide
+# FastMCP Code Copilot Server Setup
 
-## Overview
+## Requirements
 
-This Python MCP server provides a comprehensive code copilot that can:
-- Analyze code for syntax errors and complexity
-- Read and create files
-- Run tests and format code
-- Provide git repository status
-- Offer pre-configured prompts for common development tasks
+Create a `requirements.txt` file:
 
-## Installation & Setup
-
-### 1. Dependencies
-
-First, install the required Python packages:
-
-```bash
-pip install black pytest  # Optional: for code formatting and testing
+```txt
+fastmcp>=0.1.0
 ```
 
-### 2. Make the Server Executable
+## Installation
 
-```bash
-chmod +x mcp_server.py
-```
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-### 3. VS Code Configuration
+2. **Optional development tools** (for full functionality):
+   ```bash
+   pip install pytest black flake8
+   ```
 
-Create or update your VS Code MCP configuration file:
+## Configuration
 
-**Location:** `~/.vscode/mcp.json` (macOS/Linux) or `%APPDATA%\Code\User\mcp.json` (Windows)
+Create a `mcp_config.json` file to configure the server:
 
 ```json
 {
-  "servers": {
+  "mcpServers": {
     "code-copilot": {
       "command": "python",
-      "args": ["/path/to/your/mcp_server.py"],
-      "description": "Code analysis and development tools",
-      "capabilities": {
-        "resources": true,
-        "tools": true,
-        "prompts": true
-      }
+      "args": ["fastmcp_server.py"],
+      "env": {}
     }
   }
 }
 ```
 
-## Core MCP Concepts Explained
+## Usage
 
-### 1. **Resources** 
-Think of resources as "readable files" that the AI can access:
-- **What**: File contents, documentation, API responses
-- **How**: The server lists available files, AI can request to read them
-- **Example**: Python files in your project directory
+### Running the Server
 
-### 2. **Tools**
-Tools are functions the AI can execute:
-- **What**: Code analysis, file operations, running commands
-- **How**: AI calls tools with parameters, gets results back
-- **Example**: `analyze_code` tool checks syntax and complexity
+1. **Direct execution:**
+   ```bash
+   python fastmcp_server.py
+   ```
 
-### 3. **Prompts**
-Pre-configured prompt templates for common tasks:
-- **What**: Ready-made prompts for code review, debugging, optimization
-- **How**: AI can use these templates with your specific context
-- **Example**: Code review prompt that analyzes quality and security
+2. **As MCP server** (for integration with AI assistants):
+   ```bash
+   # The server will communicate via stdin/stdout using JSON-RPC
+   # This is typically handled by the MCP client (like Claude Desktop)
+   ```
 
-## Available Tools
+### Available Tools
 
-### `analyze_code`
-Analyzes Python code for:
-- Syntax errors
-- Code structure (classes, functions, imports)
-- Complexity estimation
+The server provides these tools:
 
-**Usage:**
+- **`analyze_code`**: Analyze Python code for syntax, complexity, and structure
+- **`run_tests`**: Execute Python tests using pytest
+- **`format_code`**: Format Python code using black
+- **`git_status`**: Get git repository status
+- **`create_file`**: Create new files with specified content
+- **`lint_code`**: Lint Python code using flake8
+- **`get_dependencies`**: Extract dependencies from Python files
+
+### Available Resources
+
+- Automatic discovery of Python files (`.py`)
+- Support for other code files (`.js`, `.ts`, `.html`, `.css`, `.json`, `.md`, `.yaml`)
+- File content reading with proper MIME type detection
+
+### Available Prompts
+
+- **`code-review`**: Generate comprehensive code review prompts
+- **`debug-help`**: Create debugging assistance prompts
+- **`optimize-code`**: Generate code optimization prompts
+- **`test-generation`**: Create unit test generation prompts
+
+## Key Improvements with FastMCP
+
+### 1. **Simplified Architecture**
+- Decorators for easy tool/resource/prompt registration
+- Automatic JSON-RPC handling
+- Built-in error handling and validation
+
+### 2. **Enhanced Type Safety**
+- Proper type hints throughout
+- Automatic parameter validation
+- Better error messages
+
+### 3. **Better Resource Management**
+- Automatic resource discovery
+- Proper MIME type handling
+- Clean resource URIs
+
+### 4. **Extended Functionality**
+- Additional tools (lint_code, get_dependencies)
+- More comprehensive prompts
+- Better error handling
+
+### 5. **Improved Developer Experience**
+- Cleaner, more maintainable code
+- Better separation of concerns
+- Easier to extend and modify
+
+## Example Usage in AI Assistant
+
+Once integrated with an AI assistant that supports MCP:
+
+```
+Human: Analyze this Python code for issues:
+def factorial(n):
+    if n == 0:
+        return 1
+    return n * factorial(n-1)
+
+AI: I'll analyze this code for you using the code analysis tool.
+[Uses analyze_code tool]
+
+The code analysis shows:
+- Syntax is valid
+- Simple recursive implementation
+- Missing input validation for negative numbers
+- No handling for large numbers that could cause stack overflow
+- Consider adding type hints and docstring
+
+Would you like me to help optimize this code?
+```
+
+## Integration with Claude Desktop
+
+Add to your Claude Desktop configuration:
+
 ```json
 {
-  "name": "analyze_code",
-  "arguments": {
-    "code": "def hello():\n    print('world')",
-    "file_path": "example.py"
+  "mcpServers": {
+    "code-copilot": {
+      "command": "python",
+      "args": ["/path/to/fastmcp_server.py"],
+      "cwd": "/path/to/your/project"
+    }
   }
 }
 ```
-
-### `run_tests`
-Executes Python tests using pytest:
-- Runs specific test files or directories
-- Provides detailed output including failures
-
-**Usage:**
-```json
-{
-  "name": "run_tests",
-  "arguments": {
-    "test_path": "tests/",
-    "verbose": true
-  }
-}
-```
-
-### `format_code`
-Formats Python code using Black:
-- Consistent code style
-- Configurable line length
-
-**Usage:**
-```json
-{
-  "name": "format_code",
-  "arguments": {
-    "code": "def hello( ):\nprint( 'world' )",
-    "line_length": 88
-  }
-}
-```
-
-### `git_status`
-Provides git repository information:
-- Current branch
-- File changes (modified, added, deleted)
-- Working tree status
-
-**Usage:**
-```json
-{
-  "name": "git_status",
-  "arguments": {
-    "path": "."
-  }
-}
-```
-
-### `create_file`
-Creates new files with specified content:
-- Creates parent directories if needed
-- Optional overwrite protection
-
-**Usage:**
-```json
-{
-  "name": "create_file",
-  "arguments": {
-    "file_path": "src/new_module.py",
-    "content": "# New Python module\n\ndef main():\n    pass",
-    "overwrite": false
-  }
-}
-```
-
-## Available Prompts
-
-### `code_review`
-Comprehensive code review focusing on:
-- Code quality and readability
-- Security issues
-- Performance optimizations
-- Best practices
-
-### `debug_help`
-Debugging assistance providing:
-- Error explanation
-- Likely causes
-- Step-by-step debugging
-- Fix suggestions
-
-### `optimize_code`
-Performance optimization suggestions:
-- Time complexity improvements
-- Memory usage optimization
-- Algorithm efficiency
-- Best practices
-
-## Testing the Server
-
-### 1. Direct Testing
-You can test the server directly using JSON-RPC messages:
-
-```bash
-echo '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}}' | python mcp_server.py
-```
-
-### 2. Integration Testing
-Once configured with VS Code or another MCP client, you can:
-1. Ask the AI to analyze code files in your project
-2. Request code reviews
-3. Run tests and get formatted output
-4. Get git status information
-
-## Protocol Details
-
-### Message Format
-The server uses JSON-RPC 2.0 over stdio:
-- **Input**: JSON messages on stdin (one per line)
-- **Output**: JSON responses on stdout
-- **Error Handling**: Proper JSON-RPC error responses
-
-### Capabilities
-- **Resources**: ✅ File reading and listing
-- **Tools**: ✅ Code analysis, testing, formatting, git operations
-- **Prompts**: ✅ Pre-configured development prompts
-
-## Extending the Server
-
-### Adding New Tools
-1. Add tool definition in `handle_list_tools()`
-2. Implement tool logic in `handle_call_tool()`
-3. Add the actual function (like `analyze_code()`)
-
-### Adding New Resources
-1. Modify `handle_list_resources()` to include new resource types
-2. Update `handle_read_resource()` to handle new URI schemes
-
-### Adding New Prompts
-1. Add prompt definition in `handle_list_prompts()`
-2. Implement prompt generation in `handle_get_prompt()`
-3. Add prompt template function
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Server not starting**: Check Python path and permissions
-2. **Tools failing**: Ensure required dependencies (black, pytest) are installed
-3. **File access errors**: Verify file paths and permissions
-4. **Git commands failing**: Ensure you're in a git repository
+1. **Module not found errors:**
+   - Ensure fastmcp is installed: `pip install fastmcp`
+   - Check Python path and virtual environment
 
-### Debugging
-The server logs important events to stderr. Enable debug logging:
+2. **Permission errors:**
+   - Ensure the script has execute permissions
+   - Check file/directory permissions for the working directory
 
-```python
+3. **Tool execution failures:**
+   - Ensure required tools are installed (pytest, black, flake8)
+   - Check that git is available if using git_status
+
+### Debug Mode
+
+Run with debug logging:
+```bash
+PYTHONPATH=. python -c "
+import logging
 logging.basicConfig(level=logging.DEBUG)
+from fastmcp_server import app
+app.run()
+"
 ```
 
-### Performance Notes
-- File operations are limited to the current directory tree
-- Commands have timeout limits (10-30 seconds)
-- Large files may impact performance
+## Contributing
 
-##
+The FastMCP implementation makes it easy to add new tools:
+
+```python
+@app.tool()
+async def my_new_tool(param1: str, param2: int = 42) -> str:
+    \"\"\"
+    Description of what this tool does.
+    
+    Args:
+        param1: Description of param1
+        param2: Description of param2 with default value
+    
+    Returns:
+        Description of return value
+    \"\"\"
+    # Tool implementation
+    return "result"
+```
+
+This approach with FastMCP provides a much cleaner, more maintainable, and feature-rich MCP server compared to the manual JSON-RPC implementation.
