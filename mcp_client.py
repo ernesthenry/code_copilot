@@ -1,117 +1,152 @@
-"""
-Simple MCP Client for testing your server
-"""
-
+from dotenv import load_dotenv
+from anthropic import Anthropic
+from mcp import ClientSession, StdioServerParameters, types
+from mcp.client.stdio import stdio_client
+from typing import List, Dict, TypedDict
+from contextlib import AsyncExitStack
 import json
-import subprocess
-import sys
+import asyncio
 
-class SimpleMCPClient:
-    def __init__(self, server_command):
-        self.server_command = server_command
-    
-    def send_message(self, message):
-        """Send a JSON-RPC message to the MCP server"""
+load_dotenv()
+
+class ToolDefinition(TypedDict):
+    name: str
+    description: str
+    input_schema: dict
+
+class MCP_ChatBot:
+
+    def __init__(self):
+        # Initialize session and client objects
+        self.sessions: List[ClientSession] = []
+        self.exit_stack = AsyncExitStack()
+        self.anthropic = Anthropic()
+        self.available_tools: List[ToolDefinition] = []
+        self.tool_to_session: Dict[str, ClientSession] = {}
+
+
+    async def connect_to_server(self, server_name: str, server_config: dict) -> None:
+        """Connect to a single MCP server."""
         try:
-            # Start the server process
-            process = subprocess.Popen(
-                self.server_command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
+            server_params = StdioServerParameters(**server_config)
+            stdio_transport = await self.exit_stack.enter_async_context(
+                stdio_client(server_params)
+            ) # new
+            read, write = stdio_transport
+            session = await self.exit_stack.enter_async_context(
+                ClientSession(read, write)
+            ) # new
+            await session.initialize()
+            self.sessions.append(session)
             
-            # Send the message
-            stdout, stderr = process.communicate(
-                input=json.dumps(message) + '\n',
-                timeout=10
-            )
+            # List available tools for this session
+            response = await session.list_tools()
+            tools = response.tools
+            print(f"\nConnected to {server_name} with tools:", [t.name for t in tools])
             
-            # Parse the response
-            if stdout.strip():
-                return json.loads(stdout.strip())
-            else:
-                return {"error": "No response from server", "stderr": stderr}
-                
+            for tool in tools: # new
+                self.tool_to_session[tool.name] = session
+                self.available_tools.append({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.inputSchema
+                })
         except Exception as e:
-            return {"error": str(e)}
-    
-    def initialize(self):
-        """Initialize the MCP connection"""
-        message = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {"protocolVersion": "2024-11-05"}
-        }
-        return self.send_message(message)
-    
-    def list_tools(self):
-        """List available tools"""
-        message = {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-            "params": {}
-        }
-        return self.send_message(message)
-    
-    def analyze_code(self, code):
-        """Analyze code using the server"""
-        message = {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {
-                "name": "analyze_code",
-                "arguments": {"code": code}
-            }
-        }
-        return self.send_message(message)
+            print(f"Failed to connect to {server_name}: {e}")
 
-def main():
-    # Path to your MCP server
-    server_path = input("Enter path to your mcp_server.py: ").strip()
-    if not server_path:
-        server_path = "./mcp_server.py"
+    async def connect_to_servers(self):
+        """Connect to all configured MCP servers."""
+        try:
+            with open("server_config.json", "r") as file:
+                data = json.load(file)
+            
+            servers = data.get("mcpServers", {})
+            
+            for server_name, server_config in servers.items():
+                await self.connect_to_server(server_name, server_config)
+        except Exception as e:
+            print(f"Error loading server configuration: {e}")
+            raise
     
-    client = SimpleMCPClient(["python", server_path])
+    async def process_query(self, query):
+        messages = [{'role':'user', 'content':query}]
+        response = self.anthropic.messages.create(max_tokens = 2024,
+                                      model = 'claude-3-7-sonnet-20250219', 
+                                      tools = self.available_tools,
+                                      messages = messages)
+        process_query = True
+        while process_query:
+            assistant_content = []
+            for content in response.content:
+                if content.type =='text':
+                    print(content.text)
+                    assistant_content.append(content)
+                    if(len(response.content) == 1):
+                        process_query= False
+                elif content.type == 'tool_use':
+                    assistant_content.append(content)
+                    messages.append({'role':'assistant', 'content':assistant_content})
+                    tool_id = content.id
+                    tool_args = content.input
+                    tool_name = content.name
+                    
     
-    print("=== MCP Client Test ===")
-    
-    # Test initialization
-    print("\n1. Initializing...")
-    response = client.initialize()
-    print(json.dumps(response, indent=2))
-    
-    # Test listing tools
-    print("\n2. Listing tools...")
-    response = client.list_tools()
-    if "result" in response:
-        tools = response["result"].get("tools", [])
-        print(f"Found {len(tools)} tools:")
-        for tool in tools:
-            print(f"  - {tool['name']}: {tool['description']}")
-    
-    # Test code analysis
-    print("\n3. Testing code analysis...")
-    test_code = """
-def factorial(n):
-    if n <= 1:
-        return 1
-    return n * factorial(n - 1)
+                    print(f"Calling tool {tool_name} with args {tool_args}")
+                    
+                    # Call a tool
+                    session = self.tool_to_session[tool_name]
+                    result = await session.call_tool(tool_name, arguments=tool_args)
+                    messages.append({"role": "user", 
+                                      "content": [
+                                          {
+                                              "type": "tool_result",
+                                              "tool_use_id":tool_id,
+                                              "content": result.content
+                                          }
+                                      ]
+                                    })
+                    response = self.anthropic.messages.create(max_tokens = 2024,
+                                      model = 'claude-3-7-sonnet-20250219', 
+                                      tools = self.available_tools,
+                                      messages = messages) 
+                    
+                    if(len(response.content) == 1 and response.content[0].type == "text"):
+                        print(response.content[0].text)
+                        process_query= False
 
-print(factorial(5))
-"""
-    response = client.analyze_code(test_code)
-    if "result" in response:
-        content = response["result"]["content"][0]["text"]
-        analysis = json.loads(content)
-        print(f"Analysis result:")
-        print(f"  - Syntax valid: {analysis['syntax_valid']}")
-        print(f"  - Functions: {analysis['structure_info']['functions']}")
-        print(f"  - Lines of code: {analysis['structure_info']['lines_of_code']}")
+    
+    
+    async def chat_loop(self):
+        """Run an interactive chat loop"""
+        print("\nMCP Chatbot Started!")
+        print("Type your queries or 'quit' to exit.")
+        
+        while True:
+            try:
+                query = input("\nQuery: ").strip()
+        
+                if query.lower() == 'quit':
+                    break
+                    
+                await self.process_query(query)
+                print("\n")
+                    
+            except Exception as e:
+                print(f"\nError: {str(e)}")
+    
+    async def cleanup(self): # new
+        """Cleanly close all resources using AsyncExitStack."""
+        await self.exit_stack.aclose()
+
+
+async def main():
+    chatbot = MCP_ChatBot()
+    try:
+        await chatbot.connect_to_servers()
+        await chatbot.chat_loop()
+    finally:
+        await chatbot.cleanup()
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
