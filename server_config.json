@@ -1,0 +1,10 @@
+{
+    "mcpServers": {
+      "code-copilot": {
+        "command": "python",
+        "args": ["-m", "fastmcp_server"],
+        "env": {},
+        "cwd": "."
+      }
+    }
+  }
