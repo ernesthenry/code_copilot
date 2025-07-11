@@ -1,12 +1,14 @@
 from dotenv import load_dotenv
-from anthropic import Anthropic
+import requests
+import json
+import asyncio
+import logging
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 from typing import List, Dict, TypedDict, Any
 from contextlib import AsyncExitStack
-import json
-import asyncio
-import logging
+import re
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,13 +27,61 @@ class ResourceDefinition(TypedDict):
     description: str
     mimeType: str
 
+class OllamaClient:
+    def __init__(self, base_url: str = "http://localhost:11434", model: str = "qwen2.5:latest"):
+        self.base_url = base_url
+        self.model = model
+        self.api_url = f"{base_url}/api/chat"
+    
+    def create_message(self, messages: List[Dict], tools: List[ToolDefinition] = None, stream: bool = False):
+        """Create a message using Ollama API with tool calling support. If stream=True, yield chunks as they arrive."""
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": stream,
+            "options": {
+                "temperature": 0.7,
+                "top_p": 0.9
+            }
+        }
+        
+        # Add tools if provided - convert to Ollama format
+        if tools:
+            payload["tools"] = self._convert_tools_to_ollama_format(tools)
+        
+        if stream:
+            with requests.post(self.api_url, json=payload, stream=True) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if line:
+                        yield line.decode()
+        else:
+            response = requests.post(self.api_url, json=payload, timeout=120)
+            response.raise_for_status()
+            return response.json()
+    
+    def _convert_tools_to_ollama_format(self, tools: List[ToolDefinition]) -> List[Dict]:
+        """Convert MCP tools to Ollama tool format."""
+        ollama_tools = []
+        for tool in tools:
+            ollama_tool = {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool["input_schema"]
+                }
+            }
+            ollama_tools.append(ollama_tool)
+        return ollama_tools
+
 class MCP_ChatBot:
 
-    def __init__(self):
+    def __init__(self, model: str = "qwen2.5:latest"):
         # Initialize session and client objects
         self.sessions: List[ClientSession] = []
         self.exit_stack = AsyncExitStack()
-        self.anthropic = Anthropic()
+        self.ollama = OllamaClient(model=model)
         self.available_tools: List[ToolDefinition] = []
         self.available_resources: List[ResourceDefinition] = []
         self.tool_to_session: Dict[str, ClientSession] = {}
@@ -129,109 +179,151 @@ class MCP_ChatBot:
             logger.error(f"Error reading resource {resource_uri}: {e}")
             return f"Error reading resource: {str(e)}"
 
+    def _parse_tool_calls_from_response(self, response_text: str) -> List[Dict]:
+        """Parse tool calls from Ollama response text."""
+        tool_calls = []
+        
+        # Look for tool call patterns in the response
+        # This is a simplified parser - you might need to adjust based on your model's output format
+        lines = response_text.split('\n')
+        current_tool = None
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Look for tool call indicators
+            if line.startswith('🔧') or 'tool:' in line.lower() or 'calling' in line.lower():
+                # Try to extract tool name
+                for tool in self.available_tools:
+                    if tool['name'].lower() in line.lower():
+                        current_tool = tool['name']
+                        break
+            
+            # Look for JSON-like arguments
+            if current_tool and (line.startswith('{') or 'args:' in line.lower()):
+                try:
+                    # Try to parse JSON arguments
+                    if line.startswith('{'):
+                        args = json.loads(line)
+                    else:
+                        # Extract JSON from the line
+                        json_start = line.find('{')
+                        if json_start != -1:
+                            args = json.loads(line[json_start:])
+                        else:
+                            args = {}
+                    
+                    tool_calls.append({
+                        'name': current_tool,
+                        'arguments': args,
+                        'id': f"tool_{len(tool_calls)}"
+                    })
+                    current_tool = None
+                except json.JSONDecodeError:
+                    continue
+        
+        return tool_calls
+
     async def process_query(self, query: str):
         """Process a user query with tool calling support."""
         messages = [{'role': 'user', 'content': query}]
         
+        # Add system message to help with tool calling
+        system_message = {
+            'role': 'system', 
+            'content': f'''You are an AI assistant with access to various tools. When you need to use a tool, clearly state:
+1. The tool name
+2. The arguments as JSON
+
+Available tools:
+{json.dumps([{"name": t["name"], "description": t["description"]} for t in self.available_tools], indent=2)}
+
+When calling a tool, format your response like:
+🔧 Calling tool: TOOL_NAME
+📋 Arguments: {{"arg1": "value1", "arg2": "value2"}}
+
+Be helpful and use tools when appropriate to answer the user's question.'''
+        }
+        messages.insert(0, system_message)
+        
         try:
-            response = self.anthropic.messages.create(
-                max_tokens=4096,
-                model='claude-3-5-sonnet-20241022',  # Updated model name
-                tools=self.available_tools,
-                messages=messages
-            )
+            max_iterations = 5
+            iteration = 0
             
-            process_query = True
-            while process_query:
-                assistant_content = []
+            while iteration < max_iterations:
+                iteration += 1
                 
-                for content in response.content:
-                    if content.type == 'text':
-                        print(content.text)
-                        assistant_content.append(content)
-                        if len(response.content) == 1:
-                            process_query = False
-                            
-                    elif content.type == 'tool_use':
-                        assistant_content.append(content)
+                print("🟡 Waiting for LLM response...", flush=True)
+                # Stream response from Ollama
+                response_chunks = []
+                response_text = ""
+                for chunk in self.ollama.create_message(messages, self.available_tools, stream=True):
+                    print(chunk, end='', flush=True)
+                    response_chunks.append(chunk)
+                print()  # Newline after streaming
+                response_text = ''.join(response_chunks)
+                
+                # Check if the response contains tool calls
+                tool_calls = self._parse_tool_calls_from_response(response_text)
+                
+                if not tool_calls:
+                    # No tool calls, this is the final response
+                    break
+                
+                # Add assistant message
+                messages.append({'role': 'assistant', 'content': response_text})
+                
+                # Execute tool calls
+                tool_results = []
+                for tool_call in tool_calls:
+                    tool_name = tool_call['name']
+                    tool_args = tool_call['arguments']
+                    tool_id = tool_call['id']
+                    
+                    print(f"🔧 Running tool: {tool_name}...", flush=True)
+                    print(f"📋 Arguments: {json.dumps(tool_args, indent=2)}")
+                    
+                    try:
+                        session = self.tool_to_session.get(tool_name)
+                        if not session:
+                            raise Exception(f"Tool '{tool_name}' not found")
                         
-                        # Add assistant message with tool use
-                        messages.append({'role': 'assistant', 'content': assistant_content})
+                        result = await session.call_tool(tool_name, arguments=tool_args)
                         
-                        tool_id = content.id
-                        tool_args = content.input
-                        tool_name = content.name
-                        
-                        print(f"🔧 Calling tool: {tool_name}")
-                        print(f"📋 Arguments: {json.dumps(tool_args, indent=2)}")
-                        
-                        # Execute the tool
-                        try:
-                            session = self.tool_to_session.get(tool_name)
-                            if not session:
-                                raise Exception(f"Tool '{tool_name}' not found")
-                            
-                            result = await session.call_tool(tool_name, arguments=tool_args)
-                            
-                            # Handle the result based on its type
-                            if result.content:
-                                if isinstance(result.content, list):
-                                    # Handle multiple content items
-                                    tool_result_content = []
-                                    for item in result.content:
-                                        if hasattr(item, 'text'):
-                                            tool_result_content.append(item.text)
-                                        else:
-                                            tool_result_content.append(str(item))
-                                    result_text = '\n'.join(tool_result_content)
-                                else:
-                                    # Handle single content item
-                                    if hasattr(result.content, 'text'):
-                                        result_text = result.content.text
+                        # Handle the result
+                        if result.content:
+                            if isinstance(result.content, list):
+                                tool_result_content = []
+                                for item in result.content:
+                                    if hasattr(item, 'text'):
+                                        tool_result_content.append(item.text)
                                     else:
-                                        result_text = str(result.content)
+                                        tool_result_content.append(str(item))
+                                result_text = '\n'.join(tool_result_content)
                             else:
-                                result_text = "Tool executed successfully (no output)"
-                            
-                            print(f"✅ Tool result: {result_text[:200]}{'...' if len(result_text) > 200 else ''}")
-                            
-                        except Exception as e:
-                            result_text = f"Error executing tool '{tool_name}': {str(e)}"
-                            logger.error(result_text)
-                            print(f"❌ {result_text}")
+                                if hasattr(result.content, 'text'):
+                                    result_text = result.content.text
+                                else:
+                                    result_text = str(result.content)
+                        else:
+                            result_text = "Tool executed successfully (no output)"
                         
-                        # Add tool result to messages
-                        messages.append({
-                            "role": "user", 
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": tool_id,
-                                    "content": result_text
-                                }
-                            ]
-                        })
+                        print(f"✅ Tool result: {result_text[:200]}{'...' if len(result_text) > 200 else ''}")
+                        tool_results.append(f"Tool {tool_name} result: {result_text}")
                         
-                        # Get next response from Claude
-                        try:
-                            response = self.anthropic.messages.create(
-                                max_tokens=4096,
-                                model='claude-3-5-sonnet-20241022',
-                                tools=self.available_tools,
-                                messages=messages
-                            )
-                            
-                            # Check if this is the final response
-                            if (len(response.content) == 1 and 
-                                response.content[0].type == "text"):
-                                print(response.content[0].text)
-                                process_query = False
-                                
-                        except Exception as e:
-                            logger.error(f"Error getting response from Claude: {e}")
-                            print(f"❌ Error getting response: {str(e)}")
-                            process_query = False
-                            
+                    except Exception as e:
+                        error_msg = f"Error executing tool '{tool_name}': {str(e)}"
+                        logger.error(error_msg)
+                        print(f"❌ {error_msg}")
+                        tool_results.append(f"Tool {tool_name} error: {error_msg}")
+                
+                # Add tool results to messages
+                if tool_results:
+                    tool_result_message = "Tool execution results:\n" + "\n".join(tool_results)
+                    messages.append({'role': 'user', 'content': tool_result_message})
+                else:
+                    break
+                    
         except Exception as e:
             logger.error(f"Error processing query: {e}")
             print(f"❌ Error processing query: {str(e)}")
@@ -266,7 +358,7 @@ class MCP_ChatBot:
 
     async def chat_loop(self):
         """Run an interactive chat loop with enhanced commands."""
-        print("\n🤖 MCP Chatbot Started!")
+        print(f"\n🤖 MCP Chatbot with Ollama ({self.ollama.model}) Started!")
         print("=" * 50)
         print("Commands:")
         print("  • Type your queries normally")
@@ -303,7 +395,7 @@ class MCP_ChatBot:
 
 
 async def main():
-    chatbot = MCP_ChatBot()
+    chatbot = MCP_ChatBot(model="qwen2.5:latest")
     try:
         await chatbot.connect_to_servers()
         await chatbot.chat_loop()
