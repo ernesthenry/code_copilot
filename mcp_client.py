@@ -226,6 +226,7 @@ class MCP_ChatBot:
 
     async def process_query(self, query: str):
         """Process a user query with tool calling support."""
+        import json
         messages = [{'role': 'user', 'content': query}]
         
         # Add system message to help with tool calling
@@ -257,16 +258,37 @@ Be helpful and use tools when appropriate to answer the user's question.'''
                 # Stream response from Ollama
                 response_chunks = []
                 response_text = ""
+                tool_calls = []
+                message_content = ""
                 for chunk in self.ollama.create_message(messages, self.available_tools, stream=True):
-                    print(chunk, end='', flush=True)
-                    response_chunks.append(chunk)
+                    try:
+                        data = json.loads(chunk)
+                        # Print only the assistant's message content as it streams
+                        if "message" in data and "content" in data["message"]:
+                            content = data["message"]["content"]
+                            if content:
+                                print(content, end='', flush=True)
+                                message_content += content
+                        # Collect tool calls if present
+                        if "message" in data and "tool_calls" in data["message"]:
+                            tool_calls.extend(data["message"]["tool_calls"])
+                    except Exception:
+                        # If not valid JSON, skip
+                        continue
                 print()  # Newline after streaming
-                response_text = ''.join(response_chunks)
+                response_text = message_content
                 
                 # Check if the response contains tool calls
-                tool_calls = self._parse_tool_calls_from_response(response_text)
+                parsed_tool_calls = []
+                for call in tool_calls:
+                    if "function" in call and "name" in call["function"]:
+                        parsed_tool_calls.append({
+                            'name': call["function"]["name"],
+                            'arguments': call["function"].get("arguments", {}),
+                            'id': call.get("id", f"tool_{len(parsed_tool_calls)}")
+                        })
                 
-                if not tool_calls:
+                if not parsed_tool_calls:
                     # No tool calls, this is the final response
                     break
                 
@@ -275,12 +297,12 @@ Be helpful and use tools when appropriate to answer the user's question.'''
                 
                 # Execute tool calls
                 tool_results = []
-                for tool_call in tool_calls:
+                for tool_call in parsed_tool_calls:
                     tool_name = tool_call['name']
                     tool_args = tool_call['arguments']
                     tool_id = tool_call['id']
                     
-                    print(f"🔧 Running tool: {tool_name}...", flush=True)
+                    print(f"\n🔧 Running tool: {tool_name}...", flush=True)
                     print(f"📋 Arguments: {json.dumps(tool_args, indent=2)}")
                     
                     try:
